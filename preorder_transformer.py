@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 import re
 import math
 import argparse
+import zipfile
+import tempfile
 
 class PreorderTransformer:
     def __init__(self):
@@ -480,8 +482,8 @@ Examples:
     )
     parser.add_argument(
         '--file',
-        default='alliance_catalog.txt',
-        help='Alliance catalog file path (default: alliance_catalog.txt)'
+        default='input/alliance_catalog.txt',
+        help='Alliance catalog file path (default: input/alliance_catalog.txt)'
     )
     
     args = parser.parse_args()
