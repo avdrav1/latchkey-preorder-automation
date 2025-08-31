@@ -12,6 +12,7 @@ import tempfile
 import os
 import ftplib
 import zipfile
+import hashlib
 
 # Load environment variables from .env file
 try:
@@ -23,7 +24,6 @@ except ImportError:
     st.warning("⚠️ python-dotenv not installed. Install with: pip install python-dotenv")
 
 # Import your existing transformer class
-# You'll need to make sure preorder_transformer.py is in the same directory
 try:
     from preorder_transformer import PreorderTransformer
 except ImportError:
@@ -70,8 +70,96 @@ st.markdown("""
         color: #856404;
         margin: 1rem 0;
     }
+    .login-container {
+        max-width: 400px;
+        margin: 2rem auto;
+        padding: 2rem;
+        border-radius: 0.5rem;
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+def check_admin_password():
+    """Check if admin password is configured"""
+    admin_password = None
+    
+    # Try Streamlit secrets first
+    try:
+        if hasattr(st, 'secrets') and hasattr(st.secrets, 'admin_password'):
+            admin_password = st.secrets.admin_password
+    except:
+        pass
+    
+    # Fall back to environment variable
+    if not admin_password:
+        admin_password = os.getenv('ADMIN_PASSWORD')
+    
+    return admin_password
+
+def hash_password(password):
+    """Hash password for session storage"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def show_login_form():
+    """Display login form"""
+    st.markdown('<div class="login-container">', unsafe_allow_html=True)
+    
+    st.markdown("### 🔐 Admin Access Required")
+    st.write("Enter the admin password to access the Preorder Generator:")
+    
+    # Create login form
+    with st.form("login_form"):
+        password_input = st.text_input("Password", type="password", placeholder="Enter admin password")
+        submit_button = st.form_submit_button("Login", type="primary")
+        
+        if submit_button:
+            admin_password = check_admin_password()
+            
+            if not admin_password:
+                st.error("❌ Admin password not configured. Please contact administrator.")
+                return False
+            
+            if password_input == admin_password:
+                # Store hashed password in session
+                st.session_state.authenticated = True
+                st.session_state.auth_hash = hash_password(admin_password)
+                st.rerun()
+            else:
+                st.error("❌ Invalid password. Please try again.")
+                return False
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    return False
+
+def check_authentication():
+    """Check if user is authenticated"""
+    # Check if user is logged in
+    if 'authenticated' not in st.session_state:
+        return False
+    
+    # Verify the stored hash is still valid
+    admin_password = check_admin_password()
+    if not admin_password:
+        return False
+    
+    expected_hash = hash_password(admin_password)
+    stored_hash = st.session_state.get('auth_hash', '')
+    
+    return st.session_state.authenticated and stored_hash == expected_hash
+
+def show_logout_option():
+    """Show logout button in sidebar"""
+    with st.sidebar:
+        st.markdown("---")
+        st.write("**Admin Session Active**")
+        if st.button("🚪 Logout", type="secondary"):
+            # Clear authentication
+            st.session_state.authenticated = False
+            if 'auth_hash' in st.session_state:
+                del st.session_state.auth_hash
+            st.rerun()
 
 def get_ftp_credentials():
     """Get FTP credentials from Streamlit secrets, .env file, or environment variables"""
@@ -96,6 +184,7 @@ def get_ftp_credentials():
                 'username': st.secrets.ftp.username,
                 'password': st.secrets.ftp.password,
                 'remote_directory': st.secrets.ftp.get('remote_directory', '/'),
+                'filename': 'dfStdCatalogFull_048943_LatchKey.zip',
                 'source': 'Streamlit Secrets'
             }
         else:
@@ -112,6 +201,7 @@ def get_ftp_credentials():
                     'username': username,
                     'password': password,
                     'remote_directory': remote_directory,
+                    'filename': 'dfStdCatalogFull_048943_LatchKey.zip',
                     'source': source
                 }
             else:
@@ -149,14 +239,16 @@ def show_credential_debug_info():
             st.code("""FTP_HOST=your-alliance-ftp-host.com
 FTP_USERNAME=your-username
 FTP_PASSWORD=your-password
-FTP_REMOTE_DIRECTORY=/path/to/catalog/files""")
+FTP_REMOTE_DIRECTORY=/path/to/catalog/files
+ADMIN_PASSWORD=your-secure-admin-password""")
         else:
             st.warning(f"📁 No .env file found at: {creds['env_file_path']}")
             st.write("Create a .env file with your FTP credentials:")
             st.code("""FTP_HOST=your-alliance-ftp-host.com
 FTP_USERNAME=your-username
 FTP_PASSWORD=your-password
-FTP_REMOTE_DIRECTORY=/path/to/catalog/files""")
+FTP_REMOTE_DIRECTORY=/path/to/catalog/files
+ADMIN_PASSWORD=your-secure-admin-password""")
         
         return False
     
@@ -165,93 +257,26 @@ FTP_REMOTE_DIRECTORY=/path/to/catalog/files""")
         st.write(f"   - Host: {creds['host']}")
         st.write(f"   - Username: {creds['username']}")
         st.write(f"   - Directory: {creds['remote_directory']}")
-        st.write(f"   - **Will download the newest file** regardless of filename")
+        st.write(f"   - **Target file:** {creds['filename']}")
         return True
     
     return False
 
-def find_latest_catalog_file():
-    """Find the latest file on the FTP server (regardless of name)"""
-    credentials = get_ftp_credentials()
-    
-    if 'missing' in credentials or 'error' in credentials:
-        return None, None, "FTP credentials not properly configured"
-    
-    try:
-        with ftplib.FTP(credentials['host']) as ftp:
-            ftp.login(credentials['username'], credentials['password'])
-            
-            # Change to the remote directory if specified
-            if credentials['remote_directory'] != '/':
-                ftp.cwd(credentials['remote_directory'])
-            
-            # Get list of files with details
-            files_list = []
-            ftp.retrlines('LIST', files_list.append)
-            
-            # Parse file information and collect all regular files
-            all_files = []
-            for line in files_list:
-                parts = line.split()
-                if len(parts) >= 9:
-                    # Check if it's a regular file (starts with '-')
-                    if parts[0].startswith('-'):
-                        filename = parts[-1]  # Filename is typically the last part
-                        file_size = parts[4] if parts[0].startswith('-') else None
-                        
-                        try:
-                            # Get modification time
-                            mod_time_response = ftp.voidcmd(f"MDTM {filename}")
-                            # Parse MDTM response: "213 YYYYMMDDHHMMSS"
-                            mod_time_str = mod_time_response.split()[-1]
-                            mod_time = datetime.strptime(mod_time_str, "%Y%m%d%H%M%S")
-                            
-                            all_files.append({
-                                'filename': filename,
-                                'size': file_size,
-                                'modified': mod_time,
-                                'raw_line': line
-                            })
-                        except Exception as e:
-                            # If MDTM fails, skip this file or use a fallback
-                            # We'll skip files where we can't get modification time
-                            continue
-            
-            if not all_files:
-                return None, None, "No files found in the FTP directory"
-            
-            # Sort by modification time (newest first)
-            all_files.sort(key=lambda x: x['modified'], reverse=True)
-            latest_file = all_files[0]
-            
-            return latest_file['filename'], all_files, None
-    
-    except ftplib.all_errors as e:
-        return None, None, f"FTP Error: {str(e)}"
-    except Exception as e:
-        return None, None, f"Error finding latest file: {str(e)}"
-
 def download_alliance_catalog():
-    """Download the latest Alliance catalog from FTP"""
+    """Download the Alliance catalog file from FTP"""
     credentials = get_ftp_credentials()
     
     if 'missing' in credentials or 'error' in credentials:
         return None, "FTP credentials not properly configured. Please check your .env file."
     
     try:
-        # Find the latest catalog file
-        latest_filename, all_files, error = find_latest_catalog_file()
-        if error:
-            return None, error
-        
-        if not latest_filename:
-            return None, "No files found on FTP server"
+        filename = credentials['filename']  # dfStdCatalogFull_048943_LatchKey.zip
         
         # Create a temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.txt') as tmp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_file:
             tmp_file_path = tmp_file.name
         
-        # Download the latest file
+        # Download the specific file
         with ftplib.FTP(credentials['host']) as ftp:
             ftp.login(credentials['username'], credentials['password'])
             
@@ -261,7 +286,7 @@ def download_alliance_catalog():
             
             # Get file size for progress tracking (optional)
             try:
-                file_size = ftp.size(latest_filename)
+                file_size = ftp.size(filename)
             except:
                 file_size = None
             
@@ -269,7 +294,7 @@ def download_alliance_catalog():
                 def callback(data):
                     f.write(data)
                 
-                ftp.retrbinary(f'RETR {latest_filename}', callback)
+                ftp.retrbinary(f'RETR {filename}', callback)
         
         return tmp_file_path, None
     
@@ -277,6 +302,42 @@ def download_alliance_catalog():
         return None, f"FTP Error: {str(e)}"
     except Exception as e:
         return None, f"Download Error: {str(e)}"
+
+def check_ftp_connection():
+    """Test FTP connection and return status with catalog file info"""
+    credentials = get_ftp_credentials()
+    
+    if 'missing' in credentials or 'error' in credentials:
+        return False, "FTP credentials not properly configured"
+    
+    try:
+        filename = credentials['filename']  # dfStdCatalogFull_048943_LatchKey.zip
+        
+        # Test connection and get file info
+        with ftplib.FTP(credentials['host']) as ftp:
+            ftp.login(credentials['username'], credentials['password'])
+            
+            if credentials['remote_directory'] != '/':
+                ftp.cwd(credentials['remote_directory'])
+            
+            try:
+                file_size = ftp.size(filename)
+                size_info = f"{file_size:,} bytes"
+            except:
+                size_info = "size unknown"
+            
+            try:
+                # Get modification time
+                mod_time_response = ftp.voidcmd(f"MDTM {filename}")
+                mod_time_str = mod_time_response.split()[-1]
+                mod_time = datetime.strptime(mod_time_str, "%Y%m%d%H%M%S")
+                mod_time_formatted = mod_time.strftime('%Y-%m-%d %H:%M')
+                return True, f"File: '{filename}' ({size_info}, modified: {mod_time_formatted})"
+            except:
+                return True, f"File: '{filename}' ({size_info})"
+                
+    except Exception as e:
+        return False, f"Connection failed: {str(e)}"
 
 def calculate_default_friday():
     """Calculate the default target date (4 Fridays from now)"""
@@ -325,6 +386,8 @@ def process_alliance_catalog(target_date):
         
         with debug_expander:
             st.write("**Step 1: FTP Download**")
+            credentials = get_ftp_credentials()
+            st.write(f"Target filename: **{credentials['filename']}**")
             
         tmp_file_path, error = download_alliance_catalog()
         if error:
@@ -534,47 +597,15 @@ def process_alliance_catalog(target_date):
     except Exception as e:
         return None, f"Error processing catalog: {str(e)}"
 
-def check_ftp_connection():
-    """Test FTP connection and return status with latest file info"""
-    credentials = get_ftp_credentials()
-    
-    if 'missing' in credentials or 'error' in credentials:
-        return False, "FTP credentials not properly configured"
-    
-    try:
-        # Find the latest file
-        latest_filename, all_files, error = find_latest_catalog_file()
-        if error:
-            return False, error
-        
-        if not latest_filename:
-            return False, "No files found"
-        
-        # Get file info
-        with ftplib.FTP(credentials['host']) as ftp:
-            ftp.login(credentials['username'], credentials['password'])
-            
-            if credentials['remote_directory'] != '/':
-                ftp.cwd(credentials['remote_directory'])
-            
-            try:
-                file_size = ftp.size(latest_filename)
-                size_info = f"{file_size:,} bytes"
-            except:
-                size_info = "size unknown"
-            
-            # Get the file's modification time for display
-            latest_file_info = next((f for f in all_files if f['filename'] == latest_filename), None)
-            if latest_file_info and latest_file_info['modified'] != datetime.min:
-                mod_time = latest_file_info['modified'].strftime('%Y-%m-%d %H:%M')
-                return True, f"Latest file: '{latest_filename}' ({size_info}, modified: {mod_time})"
-            else:
-                return True, f"Latest file: '{latest_filename}' ({size_info})"
-                
-    except Exception as e:
-        return False, f"Connection failed: {str(e)}"
-
 def main():
+    # Check authentication first
+    if not check_authentication():
+        show_login_form()
+        return
+    
+    # Show logout option in sidebar
+    show_logout_option()
+    
     # Header
     st.markdown('<h1 class="main-header">🎵 Latchkey Records Preorder Generator</h1>', unsafe_allow_html=True)
     
@@ -647,19 +678,19 @@ def main():
         
         **Data source:**
         - Alliance Entertainment FTP
-        - Real-time download of newest file
+        - Specific catalog file: dfStdCatalogFull_048943_LatchKey.zip
         - No file size limitations
-        - Automatic file detection
+        - Full catalog data
         """)
     
     # Processing section
     st.subheader("🚀 Generate Preorder CSV")
     
-    # Show last update info
+    # Show file info
     st.markdown("""
     <div class="info-box">
-    📊 <strong>Note:</strong> The app automatically downloads the newest file from the FTP directory. 
-    No file pattern needed - it simply grabs whatever file was most recently modified.
+    📊 <strong>Note:</strong> The app downloads the main Alliance catalog file: dfStdCatalogFull_048943_LatchKey.zip. 
+    This is the complete catalog updated regularly by Alliance Entertainment.
     </div>
     """, unsafe_allow_html=True)
     
