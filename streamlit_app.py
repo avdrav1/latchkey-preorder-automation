@@ -598,13 +598,25 @@ def process_alliance_catalog(target_date):
         return None, f"Error processing catalog: {str(e)}"
 
 def main():
-    # Check authentication first
-    if not check_authentication():
+    # Check authentication first - with better error handling for production
+    try:
+        is_authenticated = check_authentication()
+    except Exception as e:
+        # In case of session state issues, reset and require re-login
+        st.session_state.authenticated = False
+        st.session_state.auth_hash = ''
+        is_authenticated = False
+    
+    if not is_authenticated:
         show_login_form()
         return
     
     # Show logout option in sidebar
     show_logout_option()
+    
+    # Add authentication persistence note for production
+    if 'Railway' in os.getenv('RAILWAY_ENVIRONMENT', '') or os.getenv('PORT'):
+        st.sidebar.info("🔒 Authenticated session active")
     
     # Header
     st.markdown('<h1 class="main-header">🎵 Latchkey Records Preorder Generator</h1>', unsafe_allow_html=True)
