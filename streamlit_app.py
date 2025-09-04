@@ -372,13 +372,19 @@ def validate_date(selected_date):
 def process_alliance_catalog(target_date):
     """Download and process the Alliance catalog file with detailed progress tracking"""
     try:
+        # Store authentication before processing (in case of restart)
+        auth_backup = {
+            'authenticated': st.session_state.get('authenticated', False),
+            'auth_hash': st.session_state.get('auth_hash', '')
+        }
+        
         # Initialize the transformer
         transformer = PreorderTransformer()
         
         # Create progress tracking
         progress_bar = st.progress(0)
         status_text = st.empty()
-        debug_expander = st.expander("🔍 Detailed Processing Log", expanded=True)
+        debug_expander = st.expander("🔍 Detailed Processing Log", expanded=False)  # Changed to collapsed
         
         # Step 1: Download from FTP
         status_text.text("📥 Downloading Alliance catalog from FTP...")
@@ -498,77 +504,79 @@ def process_alliance_catalog(target_date):
                 st.error("❌ Could not detect file format")
                 return None, "Could not detect file format"
         
-        # Step 3: Load full data
-        status_text.text("📚 Loading complete catalog...")
+        # Step 3: Load data in chunks to save memory
+        status_text.text("📚 Processing catalog data...")
         progress_bar.progress(60)
         
-        with debug_expander:
-            st.write("**Step 4: Loading Full Dataset**")
-            
-        try:
-            df_full = pd.read_csv(analysis_file_path, dtype=str, encoding=final_encoding, sep=final_separator)
-            
-            with debug_expander:
-                st.success(f"✅ Loaded {len(df_full)} records with {len(df_full.columns)} columns")
-                
-                # Show sample data
-                if len(df_full) > 0:
-                    st.write("**Sample data from first row:**")
-                    sample_data = {}
-                    for col in df_full.columns[:10]:
-                        sample_data[col] = df_full.iloc[0][col]
-                    st.json(sample_data)
-                
-        except Exception as e:
-            with debug_expander:
-                st.error(f"❌ Failed to load full dataset: {e}")
-            return None, f"Failed to load full dataset: {e}"
-        
-        # Step 4: Transform data
-        status_text.text("🔄 Processing vinyl records...")
-        progress_bar.progress(80)
-        
+        # MEMORY OPTIMIZATION: Process in chunks instead of loading everything
         target_datetime = datetime.combine(target_date, datetime.min.time())
-        
-        # Use the loaded dataframe directly instead of calling transformer method
-        with debug_expander:
-            st.write("**Step 5: Data Transformation**")
-            st.write(f"Target date: {target_datetime.strftime('%Y-%m-%d')}")
-        
-        # Manual transformation to show progress
-        vinyl_formats = ['12-INCH SINGLE', '7-INCH SINGLE', 'VINYL LP']
         target_date_only = target_datetime.date()
+        vinyl_formats = ['12-INCH SINGLE', '7-INCH SINGLE', 'VINYL LP']
         
         matched_records = []
         total_processed = 0
         date_matches = 0
         vinyl_matches = 0
         
-        for idx, row in df_full.iterrows():
-            total_processed += 1
-            
-            # Get basic fields
-            artist = str(row.get('Artist', '')).strip() if pd.notna(row.get('Artist')) else ''
-            album = str(row.get('ItemName', '')).strip() if pd.notna(row.get('ItemName')) else ''
-            format_desc = str(row.get('FormatDesc', '')).strip() if pd.notna(row.get('FormatDesc')) else ''
-            avail_dt_raw = str(row.get('AvailDt', '')).strip() if pd.notna(row.get('AvailDt')) else ''
-            
-            # Skip if missing basic info
-            if not artist or not album:
-                continue
-            
-            # Check date
-            avail_date = transformer.parse_avail_date(avail_dt_raw)
-            if avail_date and avail_date.date() == target_date_only:
-                date_matches += 1
+        with debug_expander:
+            st.write("**Step 4: Chunked Processing (Memory Optimized)**")
+            st.write(f"Target date: {target_datetime.strftime('%Y-%m-%d')}")
+        
+        # Process file in chunks of 10,000 rows
+        chunk_size = 10000
+        chunk_progress = st.empty()
+        
+        try:
+            for chunk_num, df_chunk in enumerate(pd.read_csv(
+                analysis_file_path, 
+                dtype=str, 
+                encoding=final_encoding, 
+                sep=final_separator,
+                chunksize=chunk_size
+            )):
+                # Update progress
+                chunk_progress.text(f"Processing chunk {chunk_num + 1}...")
                 
-                # Check format
-                if format_desc in vinyl_formats:
-                    vinyl_matches += 1
-                    matched_records.append(row)
+                # Restore session state in case it was lost
+                st.session_state.authenticated = auth_backup['authenticated']
+                st.session_state.auth_hash = auth_backup['auth_hash']
+                
+                for idx, row in df_chunk.iterrows():
+                    total_processed += 1
+                    
+                    # Get basic fields
+                    artist = str(row.get('Artist', '')).strip() if pd.notna(row.get('Artist')) else ''
+                    album = str(row.get('ItemName', '')).strip() if pd.notna(row.get('ItemName')) else ''
+                    format_desc = str(row.get('FormatDesc', '')).strip() if pd.notna(row.get('FormatDesc')) else ''
+                    avail_dt_raw = str(row.get('AvailDt', '')).strip() if pd.notna(row.get('AvailDt')) else ''
+                    
+                    # Skip if missing basic info
+                    if not artist or not album:
+                        continue
+                    
+                    # Check date
+                    avail_date = transformer.parse_avail_date(avail_dt_raw)
+                    if avail_date and avail_date.date() == target_date_only:
+                        date_matches += 1
+                        
+                        # Check format
+                        if format_desc in vinyl_formats:
+                            vinyl_matches += 1
+                            matched_records.append(row)
+                
+                # Force garbage collection to free memory
+                import gc
+                del df_chunk
+                gc.collect()
+        
+        except Exception as e:
+            return None, f"Error processing data: {e}"
+        
+        status_text.text("🔄 Generating Shopify CSV...")
+        progress_bar.progress(80)
         
         with debug_expander:
-            st.write("**Step 6: Filtering Results**")
+            st.write("**Step 5: Final Results**")
             st.write(f"📊 Total records processed: {total_processed:,}")
             st.write(f"📅 Records matching target date: {date_matches}")
             st.write(f"🎵 Vinyl records found: {vinyl_matches}")
@@ -583,6 +591,7 @@ def process_alliance_catalog(target_date):
         # Step 5: Complete
         status_text.text("✅ Processing complete!")
         progress_bar.progress(100)
+        chunk_progress.empty()
         
         # Clean up temporary files
         try:
@@ -592,31 +601,23 @@ def process_alliance_catalog(target_date):
         except:
             pass
         
+        # Ensure session state is restored
+        st.session_state.authenticated = auth_backup['authenticated']
+        st.session_state.auth_hash = auth_backup['auth_hash']
+        
         return shopify_data, None
     
     except Exception as e:
         return None, f"Error processing catalog: {str(e)}"
 
 def main():
-    # Check authentication first - with better error handling for production
-    try:
-        is_authenticated = check_authentication()
-    except Exception as e:
-        # In case of session state issues, reset and require re-login
-        st.session_state.authenticated = False
-        st.session_state.auth_hash = ''
-        is_authenticated = False
-    
-    if not is_authenticated:
+    # Check authentication first
+    if not check_authentication():
         show_login_form()
         return
     
     # Show logout option in sidebar
     show_logout_option()
-    
-    # Add authentication persistence note for production
-    if 'Railway' in os.getenv('RAILWAY_ENVIRONMENT', '') or os.getenv('PORT'):
-        st.sidebar.info("🔒 Authenticated session active")
     
     # Header
     st.markdown('<h1 class="main-header">🎵 Latchkey Records Preorder Generator</h1>', unsafe_allow_html=True)
