@@ -159,6 +159,9 @@ def show_logout_option():
             st.session_state.authenticated = False
             if 'auth_hash' in st.session_state:
                 del st.session_state.auth_hash
+            # Clear URL parameter
+            if "auth" in st.query_params:
+                del st.query_params["auth"]
             st.rerun()
 
 def get_ftp_credentials():
